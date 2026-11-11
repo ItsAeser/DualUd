@@ -11,6 +11,15 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Arrange files
+        run: |
+          mkdir -p app/src/main/java/com/example/dualaudio
+          for f in Dsp.kt Presets.kt DualPlayer.kt MainActivity.kt; do
+            if [ -f "$f" ]; then mv "$f" app/src/main/java/com/example/dualaudio/; fi
+          done
+          if [ -f AndroidManifest.xml ]; then mv AndroidManifest.xml app/src/main/; fi
+          if [ -f app.gradle.kts ]; then mv app.gradle.kts app/build.gradle.kts; fi
+          find app -type f
       - run: yes | sdkmanager --licenses > /dev/null || true
       - uses: gradle/actions/setup-gradle@v4
         with:
