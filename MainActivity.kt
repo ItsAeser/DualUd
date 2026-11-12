@@ -149,9 +149,10 @@ fun App(player: DualPlayer) {
                     else startCaptureFlow()
                 }) { Text(if (player.capturing) "Stop phone audio" else "Start phone audio") }
             } else if (mode == 2) {
-                Text("No screen share needed. Tap Start, then skip or restart a track in Echo so it announces its audio. " +
-                    "Uses the equalizer below and affects whichever speaker is playing. " +
-                    "Works only if the player shares its audio session.", style = MaterialTheme.typography.bodySmall)
+                Text("No screen share needed. Pick your two speakers and set an EQ for each below. " +
+                    "Tap Start, then skip or restart a track in Echo. The app applies the EQ of whichever " +
+                    "speaker is playing and switches automatically when you switch speakers. " +
+                    "(If both play at once, Android can only apply one EQ to both.)", style = MaterialTheme.typography.bodySmall)
                 Button(onClick = {
                     val i = Intent(ctx, EffectsService::class.java)
                     if (FxState.running) ctx.startService(i.setAction("STOP"))
@@ -191,9 +192,7 @@ fun App(player: DualPlayer) {
             Slider(value = player.crossoverHz, onValueChange = { player.crossoverHz = it }, valueRange = 40f..250f)
         } }
 
-        for (i in 0..1) if (mode != 2 || i == 0) DeviceCard(
-            if (mode == 2) "Equalizer (applied to Echo)" else "Device ${"AB"[i]}",
-            i, player, devices, custom, eqOnly = mode == 2) { name, gains ->
+        for (i in 0..1) DeviceCard("Device ${"AB"[i]}", i, player, devices, custom, eqOnly = mode == 2) { name, gains ->
             custom.removeAll { it.name == name }; custom.add(Preset(name, gains)); store.save(custom)
         }
 
@@ -225,7 +224,6 @@ fun DeviceCard(title: String, idx: Int, player: DualPlayer, devices: List<AudioD
     Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium)
 
-        if (!eqOnly) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f)) {
                 OutlinedButton(onClick = { devMenu = true }, Modifier.fillMaxWidth()) {
@@ -236,9 +234,10 @@ fun DeviceCard(title: String, idx: Int, player: DualPlayer, devices: List<AudioD
                     DropdownMenuItem(text = { Text("None (don't process)") }, onClick = { player.selected[idx] = null; devMenu = false })
                 }
             }
-            FilledTonalButton(onClick = { player.testTone(idx) }) { Text("Test") }
+            if (!eqOnly) FilledTonalButton(onClick = { player.testTone(idx) }) { Text("Test") }
         }
 
+        if (!eqOnly) {
         Text("Role", style = MaterialTheme.typography.labelMedium)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Role.values().forEach { r -> FilterChip(selected = chain.role == r, onClick = { chain.role = r }, label = { Text(r.label) }) }

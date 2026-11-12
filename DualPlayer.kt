@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import androidx.compose.runtime.*
 import androidx.core.content.ContextCompat
 import java.nio.ByteOrder
@@ -366,6 +367,38 @@ class EffectsService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var last: List<Float> = emptyList()
     private var registered = false
+    private var activeIdx = 0
+    private var lastRouteCheck = 0L
+    private var lastAdded = -1
+    private var routeInfo = ""
+    private val audioManager by lazy { getSystemService(AudioManager::class.java) }
+
+    private val devCb = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) {
+            val sel = Engine.get(this@EffectsService).selected
+            added?.lastOrNull { d -> sel.any { it?.id == d.id } }?.let { lastAdded = it.id }
+        }
+    }
+
+    /** Decides which device's EQ profile to use, from which selected device is currently playing. */
+    private fun pickActive() {
+        val p = Engine.get(this)
+        val sel = p.selected
+        val route = p.systemRoute().map { it.id }.toSet()
+        val present = if (route.isNotEmpty()) route
+            else audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.id }.toSet()
+        val a = sel[0]?.let { it.id in present } == true
+        val b = sel[1]?.let { it.id in present } == true
+        routeInfo = when {
+            a && b && route.isNotEmpty() -> { activeIdx = 0
+                "Both devices are playing. Android applies one EQ to both, so Device A's EQ is used for both." }
+            a && b -> { activeIdx = if (lastAdded == sel[1]?.id) 1 else 0
+                "Both connected. Using the EQ of the one connected last (Device ${"AB"[activeIdx]})." }
+            b -> { activeIdx = 1; "Playing on ${sel[1]?.productName} → using Device B's EQ." }
+            a -> { activeIdx = 0; "Playing on ${sel[0]?.productName} → using Device A's EQ." }
+            else -> { activeIdx = 0; "Neither selected device is active. Using Device A's EQ. Pick your devices in the cards below." }
+        }
+    }
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -383,13 +416,15 @@ class EffectsService : Service() {
 
     private val poll = object : Runnable {
         override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastRouteCheck > 1000) { lastRouteCheck = now; pickActive(); publish() }
             val g = gains()
             if (g != last) { last = g; eqs.values.forEach { applyTo(it, g) } }
             handler.postDelayed(this, 250)
         }
     }
 
-    private fun gains(): List<Float> = Engine.get(this).chains[0].gains.toList()
+    private fun gains(): List<Float> = Engine.get(this).chains[activeIdx].gains.toList()
 
     private fun interp(f: Double, g: List<Float>): Double {
         val fs = BAND_FREQS
@@ -431,7 +466,7 @@ class EffectsService : Service() {
         val head = if (seen.none { it.startsWith("→") })
             "Waiting for a player to announce its audio session…\nNow skip or restart a track in Echo."
         else "Equalizer attached to ${eqs.size} session(s)."
-        FxState.log = head + "\n" + seen.takeLast(6).joinToString("\n")
+        FxState.log = head + "\n" + routeInfo + "\n" + seen.takeLast(6).joinToString("\n")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -455,6 +490,8 @@ class EffectsService : Service() {
             }
             ContextCompat.registerReceiver(this, receiver, f, ContextCompat.RECEIVER_EXPORTED)
             registered = true
+            audioManager.registerAudioDeviceCallback(devCb, handler)
+            pickActive()
             try {
                 val g = Equalizer(0, 0); g.setEnabled(true); eqs[0] = g; applyTo(g, gains())
                 seen.add("Global (session 0) EQ attached. Only works on some phones.")
@@ -468,7 +505,10 @@ class EffectsService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(poll)
-        if (registered) try { unregisterReceiver(receiver) } catch (_: Exception) {}
+        if (registered) {
+            try { unregisterReceiver(receiver) } catch (_: Exception) {}
+            try { audioManager.unregisterAudioDeviceCallback(devCb) } catch (_: Exception) {}
+        }
         eqs.values.forEach { try { it.release() } catch (_: Exception) {} }
         eqs.clear()
         FxState.running = false; FxState.log = "Stopped."
