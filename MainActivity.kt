@@ -82,7 +82,7 @@ fun App(player: DualPlayer) {
     val custom = remember { mutableStateListOf<Preset>().apply { addAll(store.load()) } }
     var refresh by remember { mutableIntStateOf(0) }
     var fileName by remember { mutableStateOf("No file") }
-    var mode by remember { mutableIntStateOf(0) }   // 0 = phone audio, 1 = file
+    var mode by remember { mutableIntStateOf(2) }   // 0 = phone audio, 1 = file, 2 = EQ only
 
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { refresh++ }
     LaunchedEffect(Unit) {
@@ -133,6 +133,7 @@ fun App(player: DualPlayer) {
 
         Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(mode == 2, { mode = 2 }, label = { Text("EQ only") })
                 FilterChip(mode == 0, { mode = 0 }, label = { Text("Phone audio") })
                 FilterChip(mode == 1, { mode = 1 }, label = { Text("File") })
             }
@@ -147,6 +148,15 @@ fun App(player: DualPlayer) {
                     if (player.capturing) ctx.startService(Intent(ctx, CaptureService::class.java).setAction("STOP"))
                     else startCaptureFlow()
                 }) { Text(if (player.capturing) "Stop phone audio" else "Start phone audio") }
+            } else if (mode == 2) {
+                Text("No screen share needed. Tap Start, then skip or restart a track in Echo so it announces its audio. " +
+                    "Uses the equalizer below and affects whichever speaker is playing. " +
+                    "Works only if the player shares its audio session.", style = MaterialTheme.typography.bodySmall)
+                Button(onClick = {
+                    val i = Intent(ctx, EffectsService::class.java)
+                    if (FxState.running) ctx.startService(i.setAction("STOP"))
+                    else ContextCompat.startForegroundService(ctx, i)
+                }) { Text(if (FxState.running) "Stop EQ" else "Start EQ") }
             } else {
                 Text(fileName, style = MaterialTheme.typography.bodyMedium)
                 var drag by remember { mutableStateOf<Float?>(null) }
@@ -160,12 +170,12 @@ fun App(player: DualPlayer) {
                     OutlinedButton(onClick = { player.lastUri?.let { player.start(it) } }) { Text("Restart") }
                 }
             }
-            Text(player.status, style = MaterialTheme.typography.bodySmall)
+            Text(if (mode == 2) FxState.log else player.status, style = MaterialTheme.typography.bodySmall)
             Text("Device picks apply when you (re)start. EQ, role, volume and delay change live.",
                 style = MaterialTheme.typography.labelSmall)
         } }
 
-        Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (mode != 2) Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Quick layouts", style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssistChip(onClick = {
@@ -181,7 +191,9 @@ fun App(player: DualPlayer) {
             Slider(value = player.crossoverHz, onValueChange = { player.crossoverHz = it }, valueRange = 40f..250f)
         } }
 
-        for (i in 0..1) DeviceCard("Device ${"AB"[i]}", i, player, devices, custom) { name, gains ->
+        for (i in 0..1) if (mode != 2 || i == 0) DeviceCard(
+            if (mode == 2) "Equalizer (applied to Echo)" else "Device ${"AB"[i]}",
+            i, player, devices, custom, eqOnly = mode == 2) { name, gains ->
             custom.removeAll { it.name == name }; custom.add(Preset(name, gains)); store.save(custom)
         }
 
@@ -204,7 +216,7 @@ private fun applyPreset(chain: DeviceChain, name: String, custom: List<Preset>) 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DeviceCard(title: String, idx: Int, player: DualPlayer, devices: List<AudioDeviceInfo>,
-               custom: List<Preset>, onSave: (String, List<Float>) -> Unit) {
+               custom: List<Preset>, eqOnly: Boolean = false, onSave: (String, List<Float>) -> Unit) {
     val chain = player.chains[idx]
     var devMenu by remember { mutableStateOf(false) }
     var presetMenu by remember { mutableStateOf(false) }
@@ -213,6 +225,7 @@ fun DeviceCard(title: String, idx: Int, player: DualPlayer, devices: List<AudioD
     Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium)
 
+        if (!eqOnly) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f)) {
                 OutlinedButton(onClick = { devMenu = true }, Modifier.fillMaxWidth()) {
@@ -235,6 +248,7 @@ fun DeviceCard(title: String, idx: Int, player: DualPlayer, devices: List<AudioD
         Slider(chain.volume, { chain.volume = it }, valueRange = 0f..1.5f)
         Text("Delay ${chain.delayMs.toInt()} ms", style = MaterialTheme.typography.labelMedium)
         Slider(chain.delayMs, { chain.delayMs = it }, valueRange = 0f..400f)
+        }
 
         HorizontalDivider()
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -4,10 +4,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.*
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.Equalizer
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -16,8 +20,10 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.compose.runtime.*
+import androidx.core.content.ContextCompat
 import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.sin
 
@@ -342,4 +348,130 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() { Engine.get(this).stop(); super.onDestroy() }
+}
+
+
+object FxState {
+    var running by mutableStateOf(false)
+    var log by mutableStateOf("Not running.")
+}
+
+/**
+ * "EQ only" mode: no screen share. Players announce their audio session with a broadcast;
+ * we attach the system Equalizer effect to that session and drive it from Device A's sliders.
+ */
+class EffectsService : Service() {
+    private val eqs = HashMap<Int, Equalizer>()
+    private val seen = ArrayList<String>()
+    private val handler = Handler(Looper.getMainLooper())
+    private var last: List<Float> = emptyList()
+    private var registered = false
+
+    private val receiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            val sid = i.getIntExtra(AudioEffect.EXTRA_AUDIO_SESSION, AudioEffect.ERROR_BAD_VALUE)
+            val pkg = i.getStringExtra(AudioEffect.EXTRA_PACKAGE_NAME) ?: "unknown app"
+            if (pkg == packageName) return
+            if (i.action == AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION) {
+                seen.add("→ $pkg opened session $sid"); attach(sid)
+            } else {
+                seen.add("← $pkg closed session $sid"); detach(sid)
+            }
+            publish()
+        }
+    }
+
+    private val poll = object : Runnable {
+        override fun run() {
+            val g = gains()
+            if (g != last) { last = g; eqs.values.forEach { applyTo(it, g) } }
+            handler.postDelayed(this, 250)
+        }
+    }
+
+    private fun gains(): List<Float> = Engine.get(this).chains[0].gains.toList()
+
+    private fun interp(f: Double, g: List<Float>): Double {
+        val fs = BAND_FREQS
+        if (f <= fs[0]) return g[0].toDouble()
+        if (f >= fs[4]) return g[4].toDouble()
+        for (i in 0 until 4) if (f <= fs[i + 1]) {
+            val t = (ln(f) - ln(fs[i].toDouble())) / (ln(fs[i + 1].toDouble()) - ln(fs[i].toDouble()))
+            return g[i] + (g[i + 1] - g[i]) * t
+        }
+        return 0.0
+    }
+
+    private fun applyTo(e: Equalizer, g: List<Float>) {
+        try {
+            val range = e.getBandLevelRange()
+            for (b in 0 until e.getNumberOfBands().toInt()) {
+                val hz = e.getCenterFreq(b.toShort()) / 1000.0
+                val lvl = (interp(hz, g) * 100).toInt().coerceIn(range[0].toInt(), range[1].toInt())
+                e.setBandLevel(b.toShort(), lvl.toShort())
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun attach(sid: Int) {
+        if (sid == AudioEffect.ERROR_BAD_VALUE || eqs.containsKey(sid)) return
+        try {
+            val e = Equalizer(0, sid)
+            e.setEnabled(true)
+            eqs[sid] = e
+            applyTo(e, gains())
+        } catch (ex: Exception) { seen.add("  ✗ couldn't attach to session $sid: ${ex.message}") }
+    }
+
+    private fun detach(sid: Int) {
+        eqs.remove(sid)?.let { try { it.release() } catch (_: Exception) {} }
+    }
+
+    private fun publish() {
+        val head = if (seen.none { it.startsWith("→") })
+            "Waiting for a player to announce its audio session…\nNow skip or restart a track in Echo."
+        else "Equalizer attached to ${eqs.size} session(s)."
+        FxState.log = head + "\n" + seen.takeLast(6).joinToString("\n")
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "STOP") { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return START_NOT_STICKY }
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel("capture", "Audio capture", NotificationManager.IMPORTANCE_LOW))
+        val n = Notification.Builder(this, "capture")
+            .setContentTitle("Dual Audio EQ")
+            .setContentText("Equalizer active")
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .build()
+        if (Build.VERSION.SDK_INT >= 29) startForeground(2, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        else startForeground(2, n)
+
+        if (!registered) {
+            val f = IntentFilter().apply {
+                addAction(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
+                addAction(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION)
+            }
+            ContextCompat.registerReceiver(this, receiver, f, ContextCompat.RECEIVER_EXPORTED)
+            registered = true
+            try {
+                val g = Equalizer(0, 0); g.setEnabled(true); eqs[0] = g; applyTo(g, gains())
+                seen.add("Global (session 0) EQ attached. Only works on some phones.")
+            } catch (_: Exception) { seen.add("Global (session 0) EQ not available on this phone.") }
+            handler.post(poll)
+        }
+        FxState.running = true
+        publish()
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(poll)
+        if (registered) try { unregisterReceiver(receiver) } catch (_: Exception) {}
+        eqs.values.forEach { try { it.release() } catch (_: Exception) {} }
+        eqs.clear()
+        FxState.running = false; FxState.log = "Stopped."
+        super.onDestroy()
+    }
 }
