@@ -39,13 +39,13 @@ class MainActivity : ComponentActivity() {
 }
 
 private fun isBt(t: Int) =
-    t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || t == AudioDeviceInfo.TYPE_HEARING_AID ||
+    t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || t == AudioDeviceInfo.TYPE_HEARING_AID ||
         (Build.VERSION.SDK_INT >= 31 && (t == AudioDeviceInfo.TYPE_BLE_HEADSET || t == AudioDeviceInfo.TYPE_BLE_SPEAKER)) ||
         (Build.VERSION.SDK_INT >= 33 && t == AudioDeviceInfo.TYPE_BLE_BROADCAST)
 
 private fun typeName(t: Int): String = when {
     t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth"
-    t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth call"
+    t == AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth (call mode)"
     t == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "Phone speaker"
     t == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "Earpiece"
     t == AudioDeviceInfo.TYPE_WIRED_HEADPHONES || t == AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired"
@@ -94,7 +94,10 @@ fun App(player: DualPlayer) {
     }
 
     val raw = rememberOutputDevices(refresh)
-    val devices = raw.filter { it.type != AudioDeviceInfo.TYPE_BLUETOOTH_SCO && it.type != AudioDeviceInfo.TYPE_TELEPHONY && it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+    // One entry per physical device (A2DP preferred over call-mode), but never hide a device that only shows up as call-mode.
+    val devices = raw.filter { it.type != AudioDeviceInfo.TYPE_TELEPHONY && it.type != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+        .groupBy { it.key() }.values
+        .map { g -> g.firstOrNull { it.type != AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ?: g.first() }
 
     LaunchedEffect(devices.map { it.id }) {
         for (i in 0..1) { val c = player.selected[i]; if (c != null && devices.none { it.id == c.id }) player.selected[i] = null }
@@ -198,7 +201,7 @@ fun App(player: DualPlayer) {
 
         Card { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Outputs Android reports right now", style = MaterialTheme.typography.titleSmall)
-            Text(if (raw.isEmpty()) "(none)" else raw.joinToString("\n") { "• ${it.label()} (id ${it.id})" },
+            Text(if (raw.isEmpty()) "(none)" else raw.joinToString("\n") { "• ${it.label()} (id ${it.id}${if (it.address.isNullOrBlank()) "" else ", " + it.address})" },
                 style = MaterialTheme.typography.bodySmall)
             Text("If your speaker isn't listed here, Android itself isn't exposing it. Check Bluetooth settings shows it " +
                 "'Connected' with Media audio ON, and try disconnecting/reconnecting it.", style = MaterialTheme.typography.labelSmall)

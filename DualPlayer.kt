@@ -28,6 +28,9 @@ import kotlin.math.ln
 import kotlin.math.pow
 import kotlin.math.sin
 
+/** Same physical device can show up as A2DP, call-mode (SCO) or LE entries with different ids; the address is stable. */
+fun AudioDeviceInfo.key(): String = if (address.isNullOrBlank()) "id:$id" else address
+
 /** One shared player for the Activity and the capture service. */
 object Engine {
     @Volatile private var inst: DualPlayer? = null
@@ -138,8 +141,8 @@ class DualPlayer(private val context: Context) {
     fun startCapture(proj: MediaProjection): Boolean {
         if (Build.VERSION.SDK_INT < 29) { status = "Phone-audio capture needs Android 10 or newer."; return false }
         stop()
-        val route = systemRoute().map { it.id }.toSet()
-        val devs = selected.map { d -> if (d != null && d.id in route) null else d }
+        val route = systemRoute().map { it.key() }.toSet()
+        val devs = selected.map { d -> if (d != null && d.key() in route) null else d }
         note = selected.indices.filter { selected[it] != null && devs[it] == null }.joinToString("\n") {
             "${"AB"[it]}: is the phone's current output, so it plays the original sound unprocessed."
         }
@@ -369,14 +372,14 @@ class EffectsService : Service() {
     private var registered = false
     private var activeIdx = 0
     private var lastRouteCheck = 0L
-    private var lastAdded = -1
+    private var lastAdded = ""
     private var routeInfo = ""
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
 
     private val devCb = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) {
             val sel = Engine.get(this@EffectsService).selected
-            added?.lastOrNull { d -> sel.any { it?.id == d.id } }?.let { lastAdded = it.id }
+            added?.lastOrNull { d -> sel.any { it?.key() == d.key() } }?.let { lastAdded = it.key() }
         }
     }
 
@@ -384,15 +387,15 @@ class EffectsService : Service() {
     private fun pickActive() {
         val p = Engine.get(this)
         val sel = p.selected
-        val route = p.systemRoute().map { it.id }.toSet()
+        val route = p.systemRoute().map { it.key() }.toSet()
         val present = if (route.isNotEmpty()) route
-            else audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.id }.toSet()
-        val a = sel[0]?.let { it.id in present } == true
-        val b = sel[1]?.let { it.id in present } == true
+            else audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.key() }.toSet()
+        val a = sel[0]?.let { it.key() in present } == true
+        val b = sel[1]?.let { it.key() in present } == true
         routeInfo = when {
             a && b && route.isNotEmpty() -> { activeIdx = 0
                 "Both devices are playing. Android applies one EQ to both, so Device A's EQ is used for both." }
-            a && b -> { activeIdx = if (lastAdded == sel[1]?.id) 1 else 0
+            a && b -> { activeIdx = if (lastAdded == sel[1]?.key()) 1 else 0
                 "Both connected. Using the EQ of the one connected last (Device ${"AB"[activeIdx]})." }
             b -> { activeIdx = 1; "Playing on ${sel[1]?.productName} → using Device B's EQ." }
             a -> { activeIdx = 0; "Playing on ${sel[0]?.productName} → using Device A's EQ." }
